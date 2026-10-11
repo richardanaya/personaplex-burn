@@ -5,10 +5,12 @@
 
 mod bridge;
 mod codec;
+mod persona;
 mod server;
 
 pub use bridge::{Activity, Bridge, RealtimeEngine};
-pub use server::serve_connection;
+pub use persona::PersonaEngine;
+pub use server::{serve_connection, serve_with_page};
 
 #[cfg(test)]
 mod tests;

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 use futures_util::{SinkExt, StreamExt};
@@ -14,6 +15,9 @@ use futures_util::{SinkExt, StreamExt};
 use super::bridge::{Activity, Bridge, RealtimeEngine};
 use super::codec::{self, f32_to_pcm16};
 use super::serve_connection;
+use super::serve_with_page;
+
+const PAGE: &str = include_str!("../../examples/realtime_web/index.html");
 
 struct Script {
     rate: u32,
@@ -453,6 +457,125 @@ async fn websocket_replay_of_pi_append_receives_ga_deltas() {
         }
     }
     assert!(saw_audio && saw_transcript);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_is_served_and_websocket_session_runs_on_a_mock() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                serve_with_page(
+                    stream,
+                    PAGE,
+                    Bridge::new(Script::new(vec![tone(480), Vec::new()])),
+                )
+                .await
+                .unwrap();
+            });
+        }
+    });
+
+    let (status, head, body) = http_exchange(addr, "GET", "/").await;
+    assert_eq!(status, 200);
+    assert!(head
+        .to_ascii_lowercase()
+        .contains("content-type: text/html"));
+    assert_eq!(body, PAGE);
+    assert!(body.contains("getUserMedia"));
+    assert!(body.contains("AudioWorklet"));
+    assert!(body.contains("input_audio_buffer.append"));
+    assert!(body.contains("session.update"));
+    assert!(body.contains("response.audio.delta"));
+    assert!(body.contains("localhost or HTTPS"));
+
+    let (index_status, _, index_body) = http_exchange(addr, "GET", "/index.html").await;
+    assert_eq!(index_status, 200);
+    assert_eq!(index_body, PAGE);
+
+    let (missing, _, _) = http_exchange(addr, "GET", "/missing").await;
+    assert_eq!(missing, 404);
+
+    let (upgrade, _, upgrade_body) = http_exchange(addr, "GET", "/v1/realtime").await;
+    assert_eq!(upgrade, 426);
+    assert!(!upgrade_body.contains("input_audio_buffer.append"));
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v1/realtime?model=personaplex"))
+            .await
+            .unwrap();
+    let created = next_json(&mut socket).await;
+    assert_eq!(created["type"], "session.created");
+    assert_eq!(created["session"]["model"], "personaplex");
+    let _conversation = next_json(&mut socket).await;
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "session.update",
+                "session": {
+                    "voice": "NATF2",
+                    "instructions": "You are a wise teacher.",
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "silence_duration_ms": 200
+                    },
+                    "audio": {
+                        "input": { "format": { "type": "audio/pcm", "rate": 24000 } },
+                        "output": { "format": { "type": "audio/pcm", "rate": 24000 } }
+                    }
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let updated = next_json(&mut socket).await;
+    assert_eq!(updated["type"], "session.updated");
+    assert_eq!(
+        updated["session"]["instructions"],
+        "You are a wise teacher."
+    );
+    socket
+        .send(Message::Text(append(&vec![0.8f32; 2_400]).into()))
+        .await
+        .unwrap();
+    let mut saw_audio = false;
+    let mut saw_transcript = false;
+    for _ in 0..12 {
+        let event = next_json(&mut socket).await;
+        match event["type"].as_str() {
+            Some("response.output_audio.delta") => saw_audio = true,
+            Some("response.output_audio_transcript.delta") => {
+                assert_eq!(event["delta"], " hi");
+                saw_transcript = true;
+            }
+            _ => {}
+        }
+        if saw_audio && saw_transcript {
+            break;
+        }
+    }
+    assert!(saw_audio && saw_transcript);
+}
+
+async fn http_exchange(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8(buf).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, head.to_string(), body.to_string())
 }
 
 async fn next_json(

@@ -8,6 +8,17 @@ cargo run --features realtime-server --bin personaplex-realtime -- --port 8080 -
 
 Clients connect to `ws://127.0.0.1:8080/v1/realtime`. A `?model=` query is echoed in `session.created` and does not select a different checkpoint. The `xai-client-secret.*` subprotocol is accepted and the token is ignored.
 
+The same server code also serves a browser client. `examples/realtime_web` embeds one HTML file and listens on a single port: the page at `/`, the socket at `/v1/realtime`. It is in addition to the cpal + ratatui TUI (`personaplex-talk`).
+
+```bash
+export HF_TOKEN=hf_...
+cargo run --example realtime_web --features realtime-server -- --port 8080 --weights ./checkpoints --voices ./voices
+```
+
+Open <http://127.0.0.1:8080/>. `--weights` can replace the download when the checkpoint is already on disk. The page uses `getUserMedia`, which browsers allow on localhost or on HTTPS only. There is no npm step; the page is plain HTML, CSS, and JS compiled in with `include_str!`.
+
+The page streams PCM16 at 24 kHz (`input_audio_buffer.append`), plays `response.output_audio.delta` (and the older `response.audio.delta` name) through a jitter buffer, and clears that buffer on `input_audio_buffer.speech_started`, `response.cancelled`, and `conversation.item.truncated`. Persona and voice controls send `session.update`. This checkpoint still does not emit a user transcript; the page shows that turn as heard, and will show text if a transcription event arrives. Model text is the inner-monologue deltas.
+
 This is feasible for audio, persona text, and a synthesized turn lifecycle. It is not a drop-in replacement for a tool-calling voice agent.
 
 ## Why the shapes do not match the model

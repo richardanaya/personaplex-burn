@@ -22,5 +22,7 @@ jobs:
         run: cargo test -p personaplex-burn --no-default-features --features flex
       - name: realtime protocol tests
         run: cargo test -p personaplex-burn --features realtime-server --lib realtime::
+      - name: realtime web example
+        run: cargo build --example realtime_web --features realtime-server
       - name: workspace build
         run: cargo build --workspace --features realtime-server

@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PersonaPlex realtime</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #1c1915;
+    --muted: #5c564c;
+    --line: #d9d1c3;
+    --paper: #f6f1e8;
+    --panel: #fffdf8;
+    --green: #1f6b4a;
+    --green-ink: #f4fff8;
+    --clay: #8c3d2f;
+    --meter: #c4a15a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.45 "Segoe UI", system-ui, sans-serif;
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 28px 20px 48px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: baseline;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font: 600 28px/1.1 Georgia, "Iowan Old Style", serif;
+    margin: 0;
+  }
+  #status {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .bar, .controls, .log {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    padding: 12px;
+  }
+  button, input, textarea {
+    font: inherit;
+    color: inherit;
+  }
+  button {
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    background: var(--green);
+    color: var(--green-ink);
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line);
+  }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .meter {
+    flex: 1;
+    height: 10px;
+    background: #efe8dc;
+    border-radius: 99px;
+    overflow: hidden;
+  }
+  #level {
+    display: block;
+    height: 100%;
+    width: 100%;
+    background: var(--meter);
+    transform: scaleX(0);
+    transform-origin: left center;
+  }
+  .controls {
+    margin-top: 12px;
+    padding: 12px;
+    display: grid;
+    gap: 10px;
+  }
+  label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+  textarea, input[type="text"] {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #fff;
+  }
+  textarea { min-height: 76px; resize: vertical; }
+  .row { display: flex; gap: 8px; align-items: end; }
+  .row label { flex: 1; }
+  .columns {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .log { min-height: 220px; max-height: 360px; overflow: auto; padding: 12px; }
+  .log h2 { margin: 0 0 8px; font-size: 14px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+  .log p { margin: 0 0 8px; white-space: pre-wrap; }
+  .log p.mark { color: var(--muted); font-size: 14px; }
+  .note { margin: 14px 0 0; color: var(--muted); font-size: 14px; }
+  @media (max-width: 700px) {
+    .columns { grid-template-columns: 1fr; }
+    header { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PersonaPlex realtime</h1>
+    <p id="status" role="status">Disconnected</p>
+  </header>
+  <div class="bar">
+    <button id="connect" type="button">Connect</button>
+    <div class="meter" aria-hidden="true"><span id="level"></span></div>
+  </div>
+  <form class="controls" id="session-form">
+    <label>Persona
+      <textarea id="persona">You are a wise teacher.</textarea>
+    </label>
+    <div class="row">
+      <label>Voice
+        <input id="voice" type="text" placeholder="file name, path, or empty" autocomplete="off">
+      </label>
+      <button class="secondary" id="apply" type="submit">Update session</button>
+    </div>
+  </form>
+  <div class="columns">
+    <section class="log" id="user-log" aria-live="polite">
+      <h2>You</h2>
+    </section>
+    <section class="log" id="model-log" aria-live="polite">
+      <h2>Model</h2>
+    </section>
+  </div>
+  <p class="note">The microphone needs localhost or HTTPS. This page and <code>/v1/realtime</code> share one port. Headphones keep the speaker out of the mic. This checkpoint does not emit a user transcript; a user turn stays blank unless <code>conversation.item.input_audio_transcription</code> arrives.</p>
+</main>
+<script>
+const TARGET_RATE = 24000;
+const FRAME = 1920;
+const statusEl = document.querySelector("#status");
+const connectBtn = document.querySelector("#connect");
+const levelEl = document.querySelector("#level");
+const personaEl = document.querySelector("#persona");
+const voiceEl = document.querySelector("#voice");
+const userLog = document.querySelector("#user-log");
+const modelLog = document.querySelector("#model-log");
+
+let socket = null;
+let audio = null;
+let mic = null;
+let playback = null;
+let capture = null;
+let busy = false;
+let live = false;
+let outputRate = TARGET_RATE;
+let pending = new Int16Array(0);
+let level = 0;
+let userTurn = null;
+let modelTurn = null;
+
+const workletUrl = URL.createObjectURL(new Blob([`
+class PcmCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.phase = 0;
+    this.hold = 0;
+  }
+  process(inputs) {
+    const channels = inputs[0];
+    if (!channels || !channels[0] || channels[0].length === 0) return true;
+    const frames = channels[0].length;
+    const mono = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      let sum = 0;
+      for (let c = 0; c < channels.length; c++) sum += channels[c][i] || 0;
+      mono[i] = sum / channels.length;
+    }
+    const step = sampleRate / ${TARGET_RATE};
+    const pcm = [];
+    let energy = 0;
+    while (this.phase < frames) {
+      const i0 = Math.floor(this.phase);
+      const frac = this.phase - i0;
+      const a = i0 < 0 ? this.hold : mono[i0];
+      const b = i0 + 1 < frames ? mono[i0 + 1] : mono[frames - 1];
+      let s = a + (b - a) * frac;
+      if (s > 1) s = 1;
+      if (s < -1) s = -1;
+      energy += s * s;
+      pcm.push(s < 0 ? (s * 32768) | 0 : (s * 32767) | 0);
+      this.phase += step;
+    }
+    this.hold = mono[frames - 1];
+    this.phase -= frames;
+    if (pcm.length) {
+      this.port.postMessage({
+        pcm: new Int16Array(pcm),
+        rms: Math.sqrt(energy / pcm.length)
+      });
+    }
+    return true;
+  }
+}
+class PcmPlayback extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.cap = sampleRate * 8;
+    this.buf = new Float32Array(this.cap);
+    this.r = 0;
+    this.w = 0;
+    this.primed = false;
+    this.pre = Math.floor(sampleRate * 0.12);
+    this.port.onmessage = (ev) => {
+      const data = ev.data || {};
+      if (data.cmd === "flush") {
+        this.r = 0;
+        this.w = 0;
+        this.primed = false;
+        return;
+      }
+      const samples = data.samples;
+      if (!samples) return;
+      for (let i = 0; i < samples.length; i++) {
+        const next = (this.w + 1) % this.cap;
+        if (next === this.r) this.r = (this.r + 1) % this.cap;
+        this.buf[this.w] = samples[i];
+        this.w = next;
+      }
+    };
+  }
+  available() {
+    return (this.w - this.r + this.cap) % this.cap;
+  }
+  process(_inputs, outputs) {
+    const channels = outputs[0];
+    if (!channels || !channels[0]) return true;
+    const n = channels[0].length;
+    if (!this.primed) {
+      if (this.available() < this.pre) {
+        for (let c = 0; c < channels.length; c++) channels[c].fill(0);
+        return true;
+      }
+      this.primed = true;
+    }
+    let played = 0;
+    for (let i = 0; i < n; i++) {
+      let sample = 0;
+      if (this.r !== this.w) {
+        sample = this.buf[this.r];
+        this.r = (this.r + 1) % this.cap;
+        played++;
+      }
+      for (let c = 0; c < channels.length; c++) channels[c][i] = sample;
+    }
+    if (played === 0) this.primed = false;
+    return true;
+  }
+}
+registerProcessor("pcm-capture", PcmCapture);
+registerProcessor("pcm-playback", PcmPlayback);
+`], { type: "application/javascript" }));
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function appendTurn(log, text, mark) {
+  const p = document.createElement("p");
+  if (mark) p.className = "mark";
+  p.textContent = text;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+  return p;
+}
+
+function stopPlayback() {
+  if (playback) playback.port.postMessage({ cmd: "flush" });
+}
+
+function bytesToBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function concatInt16(a, b) {
+  const out = new Int16Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function sendPcm(chunk) {
+  if (!live) return;
+  pending = concatInt16(pending, chunk);
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    if (pending.length > FRAME * 8) pending = pending.subarray(pending.length - FRAME * 4);
+    return;
+  }
+  while (pending.length >= FRAME) {
+    const frame = pending.subarray(0, FRAME);
+    pending = pending.subarray(FRAME);
+    socket.send(JSON.stringify({
+      type: "input_audio_buffer.append",
+      audio: bytesToBase64(frame)
+    }));
+  }
+}
+
+function pcm16ToFloat(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const view = new DataView(bytes.buffer);
+  const n = bytes.length >> 1;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = view.getInt16(i * 2, true) / 32768;
+  return out;
+}
+
+function resample(input, fromRate, toRate) {
+  if (!input.length || fromRate === toRate) return input;
+  const outLen = Math.max(1, Math.round(input.length * toRate / fromRate));
+  const out = new Float32Array(outLen);
+  const step = fromRate / toRate;
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * step;
+    const i0 = Math.floor(pos);
+    const frac = pos - i0;
+    const a = input[Math.min(i0, input.length - 1)];
+    const b = input[Math.min(i0 + 1, input.length - 1)];
+    out[i] = a + (b - a) * frac;
+  }
+  return out;
+}
+
+function playDelta(b64) {
+  if (!playback || !audio) return;
+  const floats = resample(pcm16ToFloat(b64), outputRate, audio.sampleRate);
+  playback.port.postMessage({ samples: floats });
+}
+
+function sessionUpdate() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({
+    type: "session.update",
+    session: {
+      instructions: personaEl.value,
+      voice: voiceEl.value.trim(),
+      turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 500 },
+      audio: {
+        input: { format: { type: "audio/pcm", rate: TARGET_RATE } },
+        output: { format: { type: "audio/pcm", rate: TARGET_RATE } }
+      }
+    }
+  }));
+}
+
+function addDelta(which, text) {
+  if (!text) return;
+  if (which === "user") {
+    if (!userTurn) userTurn = appendTurn(userLog, "");
+    userTurn.textContent += text;
+    userLog.scrollTop = userLog.scrollHeight;
+    return;
+  }
+  if (!modelTurn) modelTurn = appendTurn(modelLog, "");
+  modelTurn.textContent += text;
+  modelLog.scrollTop = modelLog.scrollHeight;
+}
+
+function onEvent(event) {
+  const type = event.type || "";
+  if (type === "session.created") {
+    sessionUpdate();
+    setStatus("Configuring session");
+    return;
+  }
+  if (type === "session.updated") {
+    const rate = event.session && event.session.audio && event.session.audio.output
+      && event.session.audio.output.format && event.session.audio.output.format.rate;
+    if (rate) outputRate = rate;
+    live = true;
+    setStatus("Live");
+    return;
+  }
+  if (type === "error") {
+    const message = (event.error && event.error.message) || "error";
+    setStatus(message);
+    return;
+  }
+  if (type === "input_audio_buffer.speech_started") {
+    stopPlayback();
+    userTurn = appendTurn(userLog, "");
+    setStatus("You are speaking");
+    return;
+  }
+  if (type === "input_audio_buffer.speech_stopped") {
+    if (userTurn && !userTurn.textContent) {
+      userTurn.textContent = "";
+      userTurn.className = "mark";
+      userTurn.textContent = "heard, no user transcript";
+    }
+    userTurn = null;
+    setStatus("Live");
+    return;
+  }
+  if (type === "conversation.item.input_audio_transcription.delta") {
+    addDelta("user", event.delta || "");
+    return;
+  }
+  if (type === "conversation.item.input_audio_transcription.completed") {
+    if (event.transcript && userTurn && !userTurn.textContent) userTurn.textContent = event.transcript;
+    return;
+  }
+  if (type === "response.created") {
+    modelTurn = appendTurn(modelLog, "");
+    setStatus("Model is speaking");
+    return;
+  }
+  if (type === "response.output_audio.delta" || type === "response.audio.delta") {
+    playDelta(event.delta || event.audio || "");
+    return;
+  }
+  if (type === "response.output_audio_transcript.delta"
+    || type === "response.audio_transcript.delta"
+    || type === "response.output_text.delta"
+    || type === "response.text.delta") {
+    addDelta("model", event.delta || "");
+    return;
+  }
+  if (type === "response.cancelled" || type === "conversation.item.truncated") {
+    stopPlayback();
+    modelTurn = null;
+    setStatus("Interrupted");
+    return;
+  }
+  if (type === "response.done") {
+    modelTurn = null;
+    if (statusEl.textContent === "Model is speaking") setStatus("Live");
+  }
+}
+
+function cleanup() {
+  stopPlayback();
+  live = false;
+  pending = new Int16Array(0);
+  level = 0;
+  levelEl.style.transform = "scaleX(0)";
+  if (mic) {
+    mic.getTracks().forEach((track) => track.stop());
+    mic = null;
+  }
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = null;
+  }
+  if (audio) {
+    audio.close();
+    audio = null;
+  }
+  playback = null;
+  capture = null;
+  connectBtn.textContent = "Connect";
+}
+
+async function connect() {
+  setStatus("Connecting");
+  audio = new AudioContext({ sampleRate: TARGET_RATE });
+  const micPromise = navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  });
+  try {
+    await audio.audioWorklet.addModule(workletUrl);
+    mic = await micPromise;
+  } catch (err) {
+    micPromise.then((stream) => {
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+    }).catch(() => {});
+    throw err;
+  }
+  if (audio.state === "suspended") await audio.resume();
+  capture = new AudioWorkletNode(audio, "pcm-capture");
+  playback = new AudioWorkletNode(audio, "pcm-playback");
+  capture.port.onmessage = (ev) => {
+    const data = ev.data || {};
+    if (data.rms !== undefined) {
+      level = level * 0.7 + data.rms * 0.3;
+      levelEl.style.transform = "scaleX(" + Math.min(1, level * 4) + ")";
+    }
+    if (data.pcm) sendPcm(data.pcm);
+  };
+  audio.createMediaStreamSource(mic).connect(capture);
+  playback.connect(audio.destination);
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(scheme + "://" + location.host + "/v1/realtime");
+  socket.onmessage = (ev) => {
+    if (typeof ev.data !== "string") return;
+    let event;
+    try { event = JSON.parse(ev.data); }
+    catch (_err) { return; }
+    onEvent(event);
+  };
+  socket.onerror = () => setStatus("Socket error");
+  socket.onclose = () => {
+    cleanup();
+    setStatus("Disconnected");
+  };
+  connectBtn.textContent = "Disconnect";
+}
+
+connectBtn.addEventListener("click", async () => {
+  if (socket) {
+    cleanup();
+    setStatus("Disconnected");
+    return;
+  }
+  if (busy) return;
+  busy = true;
+  connectBtn.disabled = true;
+  try {
+    await connect();
+  } catch (err) {
+    cleanup();
+    setStatus(err && err.message ? err.message : "Could not connect");
+  } finally {
+    busy = false;
+    connectBtn.disabled = false;
+  }
+});
+
+document.querySelector("#session-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  stopPlayback();
+  sessionUpdate();
+  if (socket && socket.readyState === WebSocket.OPEN) setStatus("Session update sent");
+});
+</script>
+</body>
+</html>

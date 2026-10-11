@@ -72,6 +72,7 @@ Voice conditioning is a clip (resampled, downmixed, normalized to -24 LUFS) or a
 | `personaplex-talk` | `adapters/talk` | cpal mic/speaker and a ratatui TUI. `q` quit, `m` mute, `r` reset |
 | `personaplex-server` | `adapters/server` | WebSocket plus the page in `realtime_web/` |
 | `personaplex-realtime` | library feature `realtime-server` | OpenAI Realtime / xAI Voice protocol. See [docs/realtime.md](docs/realtime.md) |
+| `realtime_web` | `examples/realtime_web` | Same protocol, plus a browser page on that port. In addition to the TUI |
 
 The first three call `inference_device()` (`Device::wgpu`). cpal, ratatui, and the simple websocket server are not dependencies of the library. `personaplex-realtime` is behind `--features realtime-server` (tokio is not in the default build) and also uses `Device::wgpu`.
 
@@ -80,9 +81,19 @@ cargo run -p personaplex-batch -- --weights ./checkpoints --input in.wav --outpu
 cargo run -p personaplex-talk -- --weights ./checkpoints --persona "You are a wise teacher." --voice voice.wav
 cargo run -p personaplex-server -- --weights ./checkpoints --bind 127.0.0.1:8787 --web realtime_web
 cargo run --features realtime-server --bin personaplex-realtime -- --port 8080 --weights ./checkpoints --voices ./voices
+cargo run --example realtime_web --features realtime-server -- --port 8080 --weights ./checkpoints --voices ./voices
 ```
 
-The web page (`http://127.0.0.1:8787/`) captures the mic and plays audio. The 7B model stays on the server. `Device::webgpu` is the browser WebGPU API and is not what this crate uses for inference: a 7B model does not fit in a tab, and that device constructor is for wasm.
+`personaplex-talk` is the cpal + ratatui TUI. `realtime_web` does not replace it. That example is one process: the page at `http://127.0.0.1:8080/` and the WebSocket at `ws://127.0.0.1:8080/v1/realtime`. The HTML, CSS, and JS are embedded in the binary (`include_str!`); there is no npm build. Open that URL after the weights load. The page captures the microphone, so it has to be served from localhost or from HTTPS. A plain `http://` page on another host will not get `getUserMedia`.
+
+Weights are the gated checkpoint. Accept the license, export `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`), or pass `--weights` pointing at a local directory with `model.safetensors`, the tokenizer safetensors, and `tokenizer_spm_32k_3.model`. `--voices` is a directory of `{name}.wav` or `{name}.safetensors` presets named by the voice field on the page.
+
+```bash
+export HF_TOKEN=hf_...
+cargo run --example realtime_web --features realtime-server -- --port 8080 --voices ./voices
+```
+
+The other web page (`http://127.0.0.1:8787/`, from `personaplex-server`) speaks the small JSON protocol below, not the OpenAI realtime events. The 7B model stays on the server. `Device::webgpu` is the browser WebGPU API and is not what this crate uses for inference: a 7B model does not fit in a tab, and that device constructor is for wasm.
 
 ### WebSocket
 

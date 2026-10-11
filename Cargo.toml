@@ -19,6 +19,11 @@ name = "personaplex-realtime"
 path = "src/bin/realtime.rs"
 required-features = ["realtime-server"]
 
+[[example]]
+name = "realtime_web"
+path = "examples/realtime_web/main.rs"
+required-features = ["realtime-server"]
+
 [features]
 ## Inference backend. Burn's wgpu runtime (Vulkan, Metal, DX12, OpenGL, WebGPU).
 default = ["wgpu"]
@@ -33,7 +38,8 @@ wgpu = ["burn/wgpu"]
 ## server inference uses [`Device::wgpu`](https://docs.rs/burn/latest/burn/tensor/struct.Device.html)
 ## instead, which still goes through wgpu and obeys the same buffer limits.
 webgpu = ["wgpu", "burn/webgpu"]
-## OpenAI Realtime / xAI Voice WebSocket server (`personaplex-realtime`).
+## OpenAI Realtime / xAI Voice WebSocket server (`personaplex-realtime`
+## and the `realtime_web` example).
 ## Off by default so the library does not depend on tokio.
 realtime-server = [
     "wgpu",
