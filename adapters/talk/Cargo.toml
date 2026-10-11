@@ -1,0 +1,19 @@
+[package]
+name = "personaplex-talk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "cpal microphone and ratatui TUI over the PersonaPlex session API"
+
+[[bin]]
+name = "personaplex-talk"
+path = "src/main.rs"
+
+[dependencies]
+personaplex-burn = { path = "../.." }
+clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
+crossterm = "0.28"
+ratatui = "0.29"

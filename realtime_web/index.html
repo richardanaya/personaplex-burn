@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PersonaPlex</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: "Iowan Old Style", Palatino, Georgia, serif;
+      background: #14120e;
+      color: #f3ead8;
+    }
+    main { max-width: 42rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-weight: 500; letter-spacing: 0.02em; margin-bottom: 0.25rem; }
+    p.note { color: #b7aa94; font-size: 0.95rem; }
+    label { display: block; margin-top: 1rem; font-size: 0.85rem; color: #d9cbb3; }
+    textarea, button {
+      font: inherit;
+      color: inherit;
+      background: #221e18;
+      border: 1px solid #4a4032;
+      border-radius: 6px;
+    }
+    textarea { width: 100%; min-height: 5rem; padding: 0.6rem; box-sizing: border-box; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.8rem; }
+    button { padding: 0.45rem 0.9rem; cursor: pointer; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    #status { margin-top: 1rem; color: #e6c98a; }
+    #log {
+      margin-top: 1rem;
+      min-height: 8rem;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      background: #0e0c0a;
+      border-radius: 6px;
+      padding: 0.8rem;
+    }
+    meter { width: 100%; height: 0.7rem; margin-top: 0.4rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>PersonaPlex</h1>
+    <p class="note">
+      The browser only captures the microphone and plays audio. The 7B model runs
+      on the server, on Burn's wgpu backend. This page does not load the weights.
+    </p>
+    <label for="persona">Persona</label>
+    <textarea id="persona">You are a wise teacher.</textarea>
+    <div class="row">
+      <button id="connect" type="button">Connect</button>
+      <button id="mute" type="button" disabled>Mute</button>
+      <button id="interrupt" type="button" disabled>Interrupt</button>
+      <button id="reset" type="button" disabled>Reset</button>
+    </div>
+    <div id="status">idle</div>
+    <label>Microphone <meter id="level" min="0" max="1" value="0"></meter></label>
+    <div id="log"></div>
+  </main>
+  <script>
+    const statusEl = document.querySelector("#status");
+    const logEl = document.querySelector("#log");
+    const levelEl = document.querySelector("#level");
+    const connectBtn = document.querySelector("#connect");
+    const muteBtn = document.querySelector("#mute");
+    const interruptBtn = document.querySelector("#interrupt");
+    const resetBtn = document.querySelector("#reset");
+    let ws = null;
+    let ctx = null;
+    let muted = false;
+    let playQueue = [];
+    let modelRate = 24000;
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function resample(input, srcRate, dstRate) {
+      if (srcRate === dstRate || input.length === 0) return input;
+      const dstLen = Math.max(1, Math.round(input.length * dstRate / srcRate));
+      const out = new Float32Array(dstLen);
+      const scale = srcRate / dstRate;
+      for (let i = 0; i < dstLen; i++) {
+        const pos = i * scale;
+        const j = Math.floor(pos);
+        const t = pos - j;
+        const a = input[Math.min(j, input.length - 1)];
+        const b = input[Math.min(j + 1, input.length - 1)];
+        out[i] = a + (b - a) * t;
+      }
+      return out;
+    }
+
+    function sendJson(payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+    }
+
+    async function connect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(proto + "://" + location.host + "/");
+      ws.binaryType = "arraybuffer";
+      ctx = new AudioContext();
+      const play = ctx.createScriptProcessor(4096, 0, 1);
+      play.onaudioprocess = (event) => {
+        const out = event.outputBuffer.getChannelData(0);
+        out.fill(0);
+        const ratio = ctx.sampleRate / modelRate;
+        const want = Math.floor(out.length / ratio);
+        if (playQueue.length < want) return;
+        const chunk = playQueue.splice(0, want);
+        const up = resample(Float32Array.from(chunk), modelRate, ctx.sampleRate);
+        out.set(up.subarray(0, out.length));
+      };
+      play.connect(ctx.destination);
+
+      ws.onopen = async () => {
+        setStatus("starting");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const source = ctx.createMediaStreamSource(stream);
+        const capture = ctx.createScriptProcessor(4096, 1, 1);
+        const sink = ctx.createGain();
+        sink.gain.value = 0;
+        capture.onaudioprocess = (event) => {
+          const input = event.inputBuffer.getChannelData(0);
+          let energy = 0;
+          for (let i = 0; i < input.length; i++) energy += input[i] * input[i];
+          levelEl.value = Math.min(1, Math.sqrt(energy / input.length) * 4);
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const pcm = resample(input, ctx.sampleRate, 16000);
+          ws.send(pcm.buffer);
+        };
+        source.connect(capture);
+        capture.connect(sink);
+        sink.connect(ctx.destination);
+        sendJson({
+          op: "start",
+          persona: document.querySelector("#persona").value,
+          sample_rate: 16000,
+          channels: 1
+        });
+        connectBtn.disabled = true;
+        muteBtn.disabled = false;
+        interruptBtn.disabled = false;
+        resetBtn.disabled = false;
+      };
+      ws.onmessage = (event) => {
+        if (typeof event.data !== "string") {
+          const pcm = new Float32Array(event.data);
+          for (let i = 0; i < pcm.length; i++) playQueue.push(pcm[i]);
+          return;
+        }
+        const msg = JSON.parse(event.data);
+        if (msg.type === "text") logEl.textContent += msg.text;
+        else if (msg.type === "status") {
+          if (msg.name === "frame") setStatus("frame " + msg.index + "  " + msg.elapsed_ms.toFixed(1) + " ms");
+          else setStatus(msg.name);
+        } else if (msg.type === "audio_format") modelRate = msg.sample_rate;
+        else if (msg.type === "error") setStatus(msg.message);
+      };
+      ws.onclose = () => setStatus("closed");
+    }
+
+    connectBtn.addEventListener("click", () => connect().catch((err) => setStatus(String(err))));
+    muteBtn.addEventListener("click", () => {
+      muted = !muted;
+      muteBtn.textContent = muted ? "Unmute" : "Mute";
+      sendJson({ op: "mute", muted });
+    });
+    interruptBtn.addEventListener("click", () => {
+      playQueue = [];
+      sendJson({ op: "interrupt" });
+    });
+    resetBtn.addEventListener("click", () => {
+      playQueue = [];
+      logEl.textContent = "";
+      sendJson({ op: "reset" });
+    });
+  </script>
+</body>
+</html>
