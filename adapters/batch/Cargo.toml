@@ -1,0 +1,16 @@
+[package]
+name = "personaplex-batch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "WAV in, WAV and text out, over the PersonaPlex session API"
+
+[[bin]]
+name = "personaplex-batch"
+path = "src/main.rs"
+
+[dependencies]
+personaplex-burn = { path = "../.." }
+clap = { version = "4", features = ["derive"] }

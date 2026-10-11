@@ -1,0 +1,45 @@
+[workspace]
+members = [".", "adapters/batch", "adapters/talk", "adapters/server"]
+resolver = "2"
+
+[package]
+name = "personaplex-burn"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+description = "NVIDIA PersonaPlex full-duplex speech-to-speech on Burn"
+readme = "README.md"
+authors = ["personaplex-burn contributors"]
+autobins = false
+autoexamples = false
+
+[features]
+## Inference backend. Burn's wgpu runtime (Vulkan, Metal, DX12, OpenGL, WebGPU).
+default = ["wgpu"]
+## Pure-Rust CPU backend (Burn Flex). Parity tests only. Burn 0.22 deprecates NdArray.
+flex = ["burn/flex"]
+## Alias for the test CPU backend.
+cpu = ["flex"]
+## GPU inference through wgpu. This is the default and the only backend the
+## session, TUI, realtime server, and web example use.
+wgpu = ["burn/wgpu"]
+## Pin an adapter to the browser WebGPU API (`Device::webgpu`). Desktop and
+## server inference uses [`Device::wgpu`](https://docs.rs/burn/latest/burn/tensor/struct.Device.html)
+## instead, which still goes through wgpu and obeys the same buffer limits.
+webgpu = ["wgpu", "burn/webgpu"]
+
+[dependencies]
+burn = { version = "0.22", default-features = false, features = ["std"] }
+ebur128 = "0.1"
+half = "2"
+hound = "3.5"
+memmap2 = "0.9"
+safetensors = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
+
+[dev-dependencies]
+serde_json = "1"

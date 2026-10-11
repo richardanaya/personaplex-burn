@@ -1,0 +1,20 @@
+[package]
+name = "personaplex-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "Realtime WebSocket server and static page over the PersonaPlex session API"
+
+[[bin]]
+name = "personaplex-server"
+path = "src/main.rs"
+
+[dependencies]
+personaplex-burn = { path = "../.." }
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio-tungstenite = "0.26"
