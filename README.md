@@ -129,7 +129,7 @@ A local directory works with no token. It needs:
 - `tokenizer-e351c8d8-checkpoint125.safetensors`
 - `tokenizer_spm_32k_3.model`
 
-The checkpoint is bf16. It is widened to f32 while parsing, then stored as f16 or f32 (`DtypePolicy::Auto` asks `device.supports_dtype(F16)`). Burn's wgpu backend does not run bf16 kernels. If the real checkpoint was trained with `dep_q=8`, those depth-transformer weights are tiled out to 16 the way the NVIDIA loader does.
+The checkpoint is bf16. Each tensor is converted to f16 or f32 when it is uploaded (`DtypePolicy::Auto` asks `device.supports_dtype(F16)`), and the file pages for that tensor are released. The whole checkpoint is not widened to f32 in host memory. Burn's wgpu backend does not run bf16 kernels. If the real checkpoint was trained with `dep_q=8`, those depth-transformer weights are tiled out to 16 the way the NVIDIA loader does.
 
 ## WebGPU limits and VRAM
 

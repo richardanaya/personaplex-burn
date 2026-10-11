@@ -24,6 +24,10 @@ name = "realtime_web"
 path = "examples/realtime_web/main.rs"
 required-features = ["realtime-server"]
 
+[[example]]
+name = "smoke_load"
+path = "examples/smoke_load.rs"
+
 [features]
 ## Inference backend. Burn's wgpu runtime (Vulkan, Metal, DX12, OpenGL, WebGPU).
 default = ["wgpu"]

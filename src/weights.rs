@@ -1,17 +1,19 @@
 //! Safetensors loading, the depformer 8→16 expansion, and [`PersonaPlex`].
 //!
-//! Checkpoints are bf16 or f16 on disk. They are widened to f32 while parsing,
-//! then stored as f16 or f32 depending on [`DtypePolicy`] and
-//! `device.supports_dtype`. Matrices larger than the WebGPU buffer budget are
-//! split by [`crate::util::RowChunks`].
+//! The file stays mapped. Each tensor is converted to the device dtype when
+//! that parameter is uploaded, then the file pages for that tensor are
+//! dropped. WebGPU stores f16 when `shader-f16` is available and f32
+//! otherwise. Burn's wgpu backend does not run bf16 kernels. Matrices larger
+//! than the WebGPU buffer budget are split by [`crate::util::RowChunks`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use burn::module::Param;
-use burn::tensor::{DType, Device, Tensor};
+use burn::tensor::{DType, Device, Tensor, TensorData};
 use half::{bf16, f16};
+use memmap2::{Mmap, UncheckedAdvice};
 use safetensors::Dtype as SafeDtype;
 use safetensors::SafeTensors;
 
@@ -28,15 +30,24 @@ const LM_FILE: &str = "model.safetensors";
 const MIMI_FILE: &str = "tokenizer-e351c8d8-checkpoint125.safetensors";
 const TOK_FILE: &str = "tokenizer_spm_32k_3.model";
 
+/// One tensor still sitting in the mapped file.
+///
+/// `repeats` tiles the file rows at upload time. The depformer 8→16 expansion
+/// uses that, and copied steps share this descriptor, so neither path allocates
+/// a second host copy of the weights.
 #[derive(Clone)]
-struct RawTensor {
+struct Slot {
     shape: Vec<usize>,
-    data: Vec<f32>,
+    src: SafeDtype,
+    start: usize,
+    len: usize,
+    repeats: usize,
 }
 
-/// CPU-side checkpoint. Device tensors are created from this on demand.
+/// Mapped checkpoint. Device tensors are created one key at a time.
 pub struct Weights {
-    tensors: HashMap<String, RawTensor>,
+    mmap: Mmap,
+    tensors: HashMap<String, Slot>,
     dtype: DType,
 }
 
@@ -48,26 +59,47 @@ impl Weights {
     pub fn from_file(path: impl AsRef<Path>, dtype: DType) -> Result<Self> {
         let path = path.as_ref();
         let file = std::fs::File::open(path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
+        let mmap = unsafe { Mmap::map(&file) }
             .map_err(|err| Error::checkpoint(format!("mmap {}: {err}", path.display())))?;
-        let tensors = SafeTensors::deserialize(&mmap)
+        let views = SafeTensors::deserialize(&mmap)
             .map_err(|err| Error::checkpoint(format!("{}: {err}", path.display())))?;
-        let mut map = HashMap::new();
-        for (name, view) in tensors.tensors() {
+        let base = mmap.as_ptr() as usize;
+        let mut tensors = HashMap::new();
+        for (name, view) in views.tensors() {
+            let data = view.data();
+            let start = data.as_ptr() as usize - base;
             let shape = view.shape().to_vec();
-            let data = decode_tensor(view.dtype(), view.data())
-                .map_err(|err| Error::checkpoint(format!("{name}: {err}")))?;
             let expected: usize = shape.iter().product();
-            if data.len() != expected {
+            let width = match view.dtype() {
+                SafeDtype::F32 => 4,
+                SafeDtype::F16 | SafeDtype::BF16 => 2,
+                other => {
+                    return Err(Error::checkpoint(format!(
+                        "{name}: unsupported safetensors dtype {other:?}"
+                    )))
+                }
+            };
+            if data.len() != expected * width {
                 return Err(Error::checkpoint(format!(
-                    "{name}: decoded {} values, shape {shape:?} wants {expected}",
-                    data.len()
+                    "{name}: {} bytes, shape {shape:?} wants {} values",
+                    data.len(),
+                    expected
                 )));
             }
-            map.insert(name.to_string(), RawTensor { shape, data });
+            tensors.insert(
+                name.to_string(),
+                Slot {
+                    shape,
+                    src: view.dtype(),
+                    start,
+                    len: data.len(),
+                    repeats: 1,
+                },
+            );
         }
         Ok(Self {
-            tensors: map,
+            mmap,
+            tensors,
             dtype,
         })
     }
@@ -77,11 +109,17 @@ impl Weights {
     }
 
     pub fn copy_f32(&self, key: &str) -> Result<(Vec<usize>, Vec<f32>)> {
-        let raw = self
+        let slot = self
             .tensors
             .get(key)
             .ok_or_else(|| Error::checkpoint(format!("missing tensor {key}")))?;
-        Ok((raw.shape.clone(), raw.data.clone()))
+        let bytes = &self.mmap[slot.start..slot.start + slot.len];
+        let mut data = decode_tensor(slot.src, bytes)
+            .map_err(|err| Error::checkpoint(format!("{key}: {err}")))?;
+        if slot.repeats > 1 {
+            data = repeat_rows(&data, slot.repeats);
+        }
+        Ok((slot.shape.clone(), data))
     }
 
     pub fn param1(&mut self, key: &str, device: &Device) -> Result<Param<Tensor<1>>> {
@@ -106,23 +144,58 @@ impl Weights {
     }
 
     fn tensor<const D: usize>(&mut self, key: &str, device: &Device) -> Result<Tensor<D>> {
-        let raw = self
+        let slot = self
             .tensors
             .get(key)
+            .cloned()
             .ok_or_else(|| Error::checkpoint(format!("missing tensor {key}")))?;
-        if raw.shape.len() != D {
+        if slot.shape.len() != D {
             return Err(Error::checkpoint(format!(
                 "{key}: rank {} , expected {D}",
-                raw.shape.len()
+                slot.shape.len()
             )));
         }
         let mut shape = [0usize; D];
-        shape.copy_from_slice(&raw.shape);
-        let tensor = util::f32_tensor(raw.data.clone(), shape, device);
-        Ok(match self.dtype {
-            DType::F32 => tensor,
-            other => tensor.cast(other),
-        })
+        shape.copy_from_slice(&slot.shape);
+        let tensor = {
+            let bytes = &self.mmap[slot.start..slot.start + slot.len];
+            match self.dtype {
+                DType::F32 => {
+                    let mut data = decode_tensor(slot.src, bytes)
+                        .map_err(|err| Error::checkpoint(format!("{key}: {err}")))?;
+                    if slot.repeats > 1 {
+                        data = repeat_rows(&data, slot.repeats);
+                    }
+                    util::f32_tensor(data, shape, device)
+                }
+                DType::F16 => {
+                    let mut raw = f16_bytes(slot.src, bytes)
+                        .map_err(|err| Error::checkpoint(format!("{key}: {err}")))?;
+                    if slot.repeats > 1 {
+                        raw = repeat_rows(&raw, slot.repeats);
+                    }
+                    Tensor::<D>::from_data(
+                        TensorData::from_bytes_vec(raw, shape, DType::F16),
+                        device,
+                    )
+                }
+                other => {
+                    return Err(Error::checkpoint(format!(
+                        "weights are stored as f16 or f32, not {other:?}"
+                    )))
+                }
+            }
+        };
+        // File-backed map: the kernel drops these pages and refills them from
+        // disk if a later key aliases the same range. The bytes are already copied.
+        unsafe {
+            let _ = self.mmap.unchecked_advise_range(
+                UncheckedAdvice::DontNeed,
+                slot.start,
+                slot.len,
+            );
+        }
+        Ok(tensor)
     }
 
     /// Match `get_moshi_lm`: tile short depformer attention and copy steps 0..7 onto 8..15.
@@ -152,8 +225,9 @@ impl Weights {
                     let Some(pos) = key.find(&needle) else {
                         continue;
                     };
-                    let src = self.tensors.get(&key).cloned();
-                    let Some(src) = src else { continue };
+                    let Some(src) = self.tensors.get(&key).cloned() else {
+                        continue;
+                    };
                     for new in 8..dep_q {
                         let repl = format!("{group}.{new}.");
                         let new_key =
@@ -166,26 +240,61 @@ impl Weights {
     }
 
     fn tile_rows(&mut self, key: &str, expected_rows: usize) {
-        let Some(raw) = self.tensors.get(key) else {
+        let Some(slot) = self.tensors.get_mut(key) else {
             return;
         };
-        if raw.shape.is_empty() || raw.shape[0] == 0 || raw.shape[0] >= expected_rows {
+        if slot.shape.is_empty() || slot.shape[0] == 0 || slot.shape[0] >= expected_rows {
             return;
         }
-        if !expected_rows.is_multiple_of(raw.shape[0]) {
+        let file_rows = slot.shape[0] / slot.repeats;
+        if file_rows == 0 || !expected_rows.is_multiple_of(file_rows) {
             return;
         }
-        let repeats = expected_rows / raw.shape[0];
-        let row_len = raw.data.len() / raw.shape[0];
-        let mut data = Vec::with_capacity(raw.data.len() * repeats);
-        for _ in 0..repeats {
-            data.extend_from_slice(&raw.data);
+        slot.repeats = expected_rows / file_rows;
+        slot.shape[0] = expected_rows;
+    }
+}
+
+fn repeat_rows<T: Clone>(data: &[T], repeats: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(data.len() * repeats);
+    for _ in 0..repeats {
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+/// File bytes converted to little-endian f16, one element at a time.
+fn f16_bytes(dtype: SafeDtype, bytes: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    match dtype {
+        SafeDtype::F16 => {
+            if !bytes.len().is_multiple_of(2) {
+                return Err("f16 length is not a multiple of 2".into());
+            }
+            Ok(bytes.to_vec())
         }
-        let mut shape = raw.shape.clone();
-        shape[0] = expected_rows;
-        debug_assert_eq!(data.len(), row_len * expected_rows);
-        self.tensors
-            .insert(key.to_string(), RawTensor { shape, data });
+        SafeDtype::BF16 => {
+            if !bytes.len().is_multiple_of(2) {
+                return Err("bf16 length is not a multiple of 2".into());
+            }
+            let mut out = Vec::with_capacity(bytes.len());
+            for chunk in bytes.as_chunks::<2>().0 {
+                let value = bf16::from_bits(u16::from_le_bytes(*chunk));
+                out.extend_from_slice(&f16::from_f32(value.to_f32()).to_le_bytes());
+            }
+            Ok(out)
+        }
+        SafeDtype::F32 => {
+            if !bytes.len().is_multiple_of(4) {
+                return Err("f32 length is not a multiple of 4".into());
+            }
+            let mut out = Vec::with_capacity(bytes.len() / 2);
+            for chunk in bytes.as_chunks::<4>().0 {
+                let value = f32::from_le_bytes(*chunk);
+                out.extend_from_slice(&f16::from_f32(value).to_le_bytes());
+            }
+            Ok(out)
+        }
+        other => Err(format!("unsupported safetensors dtype {other:?}")),
     }
 }
 
