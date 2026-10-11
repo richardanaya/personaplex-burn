@@ -17,8 +17,10 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets --features flex -- -D warnings
+        run: cargo clippy --workspace --all-targets --features "flex,realtime-server" -- -D warnings
       - name: flex parity tests
         run: cargo test -p personaplex-burn --no-default-features --features flex
+      - name: realtime protocol tests
+        run: cargo test -p personaplex-burn --features realtime-server --lib realtime::
       - name: workspace build
-        run: cargo build --workspace
+        run: cargo build --workspace --features realtime-server

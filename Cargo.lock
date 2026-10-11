@@ -4954,8 +4954,11 @@ dependencies = [
 name = "personaplex-burn"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "burn",
+ "clap",
  "ebur128",
+ "futures-util",
  "half",
  "hf-hub",
  "hound",
@@ -4964,6 +4967,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

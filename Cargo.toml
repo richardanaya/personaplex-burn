@@ -14,6 +14,11 @@ authors = ["personaplex-burn contributors"]
 autobins = false
 autoexamples = false
 
+[[bin]]
+name = "personaplex-realtime"
+path = "src/bin/realtime.rs"
+required-features = ["realtime-server"]
+
 [features]
 ## Inference backend. Burn's wgpu runtime (Vulkan, Metal, DX12, OpenGL, WebGPU).
 default = ["wgpu"]
@@ -28,6 +33,16 @@ wgpu = ["burn/wgpu"]
 ## server inference uses [`Device::wgpu`](https://docs.rs/burn/latest/burn/tensor/struct.Device.html)
 ## instead, which still goes through wgpu and obeys the same buffer limits.
 webgpu = ["wgpu", "burn/webgpu"]
+## OpenAI Realtime / xAI Voice WebSocket server (`personaplex-realtime`).
+## Off by default so the library does not depend on tokio.
+realtime-server = [
+    "wgpu",
+    "dep:base64",
+    "dep:clap",
+    "dep:futures-util",
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+]
 
 [dependencies]
 burn = { version = "0.22", default-features = false, features = ["std"] }
@@ -40,6 +55,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
+base64 = { version = "0.22", optional = true }
+clap = { version = "4", optional = true, features = ["derive"] }
+futures-util = { version = "0.3", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio-tungstenite = { version = "0.26", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

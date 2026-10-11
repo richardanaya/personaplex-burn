@@ -71,13 +71,15 @@ Voice conditioning is a clip (resampled, downmixed, normalized to -24 LUFS) or a
 | `personaplex-batch` | `adapters/batch` | WAV in, WAV and text out |
 | `personaplex-talk` | `adapters/talk` | cpal mic/speaker and a ratatui TUI. `q` quit, `m` mute, `r` reset |
 | `personaplex-server` | `adapters/server` | WebSocket plus the page in `realtime_web/` |
+| `personaplex-realtime` | library feature `realtime-server` | OpenAI Realtime / xAI Voice protocol. See [docs/realtime.md](docs/realtime.md) |
 
-All three call `inference_device()` (`Device::wgpu`). None of cpal, ratatui, tokio, or tungstenite is a dependency of the library.
+The first three call `inference_device()` (`Device::wgpu`). cpal, ratatui, and the simple websocket server are not dependencies of the library. `personaplex-realtime` is behind `--features realtime-server` (tokio is not in the default build) and also uses `Device::wgpu`.
 
 ```bash
 cargo run -p personaplex-batch -- --weights ./checkpoints --input in.wav --output out.wav --text out.txt --persona "You are a wise teacher." --voice voice.wav
 cargo run -p personaplex-talk -- --weights ./checkpoints --persona "You are a wise teacher." --voice voice.wav
 cargo run -p personaplex-server -- --weights ./checkpoints --bind 127.0.0.1:8787 --web realtime_web
+cargo run --features realtime-server --bin personaplex-realtime -- --port 8080 --weights ./checkpoints --voices ./voices
 ```
 
 The web page (`http://127.0.0.1:8787/`) captures the mic and plays audio. The 7B model stays on the server. `Device::webgpu` is the browser WebGPU API and is not what this crate uses for inference: a 7B model does not fit in a tab, and that device constructor is for wasm.

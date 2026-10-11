@@ -23,6 +23,9 @@ pub mod transformer;
 pub mod util;
 pub mod weights;
 
+#[cfg(feature = "realtime-server")]
+pub mod realtime;
+
 pub use backend::{backend_name, DtypePolicy, MAX_WEIGHT_BUFFER_BYTES};
 pub use batch::{process_batch, BatchOutput};
 pub use config::{ModelConfig, SamplingConfig, SessionConfig, VoicePrompt};
