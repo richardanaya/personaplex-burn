@@ -4,6 +4,25 @@ NVIDIA [PersonaPlex](https://github.com/NVIDIA/personaplex) (full-duplex speech-
 
 The weights are `nvidia/personaplex-7b-v1` on Hugging Face, under the NVIDIA Open Model License. They are gated.
 
+## Realtime example
+
+This is the way to try the model. One process serves a browser page and an OpenAI Realtime / xAI Voice WebSocket on the same port. The page is built into the binary. There is no npm step.
+
+```bash
+cargo run --release --example realtime_web --features realtime-server -- \
+  --port 8080 --weights ./checkpoints
+```
+
+Open <http://127.0.0.1:8080/>. Press Connect, allow the microphone, and wait. The status stays on "Configuring session" while the model reads the persona. For "You are a wise teacher." that is on the order of 10–30 seconds, then the status becomes "Live". A voice file adds one model step per frame of that clip. Leave Voice empty to skip it.
+
+The socket is `ws://127.0.0.1:8080/v1/realtime`. Use headphones so the speaker does not feed the mic. This checkpoint does not emit a user transcript, so the YOU panel stays blank unless a transcription event arrives. Model text is the inner monologue.
+
+![PersonaPlex realtime page, after the model has started speaking](docs/realtime-web.png)
+
+Loading the 7B checkpoint takes about half a minute before the server accepts connections. On a machine where one frame takes around a second, replies are slower than the model's 80 ms budget. The page still works. It just does not feel realtime.
+
+`--voices ./voices` is a directory of `{name}.wav` or `{name}.safetensors` files. The Voice field on the page is that file name. Protocol details are in [docs/realtime.md](docs/realtime.md). `personaplex-realtime` is the same socket without the page.
+
 ## Session API
 
 [`Session`](src/session.rs) is the interface. It does not open a microphone, a socket, or a file. Adapters do that.
@@ -84,7 +103,7 @@ cargo run --features realtime-server --bin personaplex-realtime -- --port 8080 -
 cargo run --example realtime_web --features realtime-server -- --port 8080 --weights ./checkpoints --voices ./voices
 ```
 
-`personaplex-talk` is the cpal + ratatui TUI. `realtime_web` does not replace it. That example is one process: the page at `http://127.0.0.1:8080/` and the WebSocket at `ws://127.0.0.1:8080/v1/realtime`. The HTML, CSS, and JS are embedded in the binary (`include_str!`); there is no npm build. Open that URL after the weights load. The page captures the microphone, so it has to be served from localhost or from HTTPS. A plain `http://` page on another host will not get `getUserMedia`.
+`personaplex-talk` is the cpal + ratatui TUI. The realtime page is the section above. The microphone works on localhost or HTTPS only. A plain `http://` page on another host will not get `getUserMedia`.
 
 Weights are the gated checkpoint. Accept the license, export `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`), or pass `--weights` pointing at a local directory with `model.safetensors`, the tokenizer safetensors, and `tokenizer_spm_32k_3.model`. `--voices` is a directory of `{name}.wav` or `{name}.safetensors` presets named by the voice field on the page.
 
